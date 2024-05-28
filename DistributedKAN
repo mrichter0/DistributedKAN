@@ -26,6 +26,7 @@ class ParameterServer(nn.Module):
                 self.stored_params[idx] = (self.stored_params[idx] + param.to(ps_device)) / 2
         return [param.clone().cpu().numpy() for param in self.stored_params]
 
+#use this to troubleshoot any parameter passing
 def print_params(rank, received_params, stored_params):
     print(f"Rank {rank}: Param 0 (Worker): {received_params[0][:5].cpu().numpy()}, "
           f"Param 1 (Worker): {received_params[1][:5].cpu().numpy()}", flush=True)
@@ -66,7 +67,7 @@ def calculate_aupr(model, test_loader, rank, epoch, avg_epoch_loss, epoch_start_
         print(f"Model saved with AUPR: {formatted_aupr}. Exiting script.")
     print(f"Rank {rank}: Epoch {epoch + 1}, AUPR After Averaging: {aupr:.4f}, Avg Log Loss: {avg_epoch_loss:.4f}, Time Elapsed: {time.time() - epoch_start_time:.2f}s", flush=True)
 
-def worker_process(rank, model, train_loader, test_loader, parameter_queue, device, pos_weight):
+def worker_process(rank, model, train_loader, test_loader, parameter_queue, device):
     model.to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
@@ -111,7 +112,7 @@ def worker_process(rank, model, train_loader, test_loader, parameter_queue, devi
 
     print(f"Rank {rank}: Finished training", flush=True)
 
-def find_and_load_best_model(model, model_dir='saved_models_HSA'):
+def find_and_load_best_model(model, model_dir='saved_models'):
     model_filename_pattern = re.compile(r'model_aupr_(\d+\.\d+)\.pth')
     best_model_file = None
 
@@ -133,7 +134,7 @@ def find_and_load_best_model(model, model_dir='saved_models_HSA'):
     
     return model
 
-def main(train_loader, test_loader, pos_weight):
+def main(train_loader, test_loader):
     world_size = torch.cuda.device_count()  # Adjust for the server process
     model = FastKAN([768, 64, 1])
     model = find_and_load_best_model(model)
@@ -146,15 +147,7 @@ def main(train_loader, test_loader, pos_weight):
     train_size = len(train_loader.dataset)
     indices = list(range(train_size))
     split_size = train_size // world_size
-#    overlap_size = int(0.4 * split_size)  # 30% overlap
-#
-#    train_loaders = []
-#    for i in range(world_size):
-#        start_idx = max(0, i * split_size - overlap_size)
-#        end_idx = min(train_size, (i + 1) * split_size + overlap_size)
-#        train_indices = indices[start_idx:end_idx]
-#        train_subset = Subset(train_loader.dataset, train_indices)
-#        train_loaders.append(DataLoader(train_subset, batch_size=train_loader.batch_size, shuffle=True))
+
     train_loaders = []
     for i in range(world_size):
         start_idx = i * split_size
@@ -171,10 +164,10 @@ def main(train_loader, test_loader, pos_weight):
     workers = []
     for rank in range(world_size):  # Include rank 0 for training
         device = torch.device(f"cuda:{rank}")
-        worker = ctx.Process(target=worker_process, args=(rank, model, train_loaders[rank], test_loaders[rank], parameter_queues[rank], device, pos_weight))
+        worker = ctx.Process(target=worker_process, args=(rank, model, train_loaders[rank], test_loaders[rank], parameter_queues[rank], device))
         worker.start()
         workers.append(worker)
-        time.sleep(4)  # Stagger the starting of each device by 8 seconds
+        time.sleep(4)  
 
     for worker in workers:
         worker.join()

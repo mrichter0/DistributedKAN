@@ -1,0 +1,182 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.multiprocessing import Queue, Process, get_context
+import time
+from torch.utils.data import DataLoader, Subset
+from sklearn.metrics import precision_recall_curve, auc
+import pandas as pd
+import torch.multiprocessing as mp
+from models import FastKAN  # Import the FastKAN model
+import re
+import os
+
+class ParameterServer(nn.Module):
+    def __init__(self, model):
+        super(ParameterServer, self).__init__()
+        self.model = model
+        self.stored_params = None
+
+    def update_and_average_parameters(self, received_params, ps_device):
+        if self.stored_params is None:
+            self.stored_params = [param.to(ps_device) for param in received_params]
+        else:
+            for idx, param in enumerate(received_params):
+                self.stored_params[idx] = (self.stored_params[idx] + param.to(ps_device)) / 2
+        return [param.clone().cpu().numpy() for param in self.stored_params]
+
+def print_params(rank, received_params, stored_params):
+    print(f"Rank {rank}: Param 0 (Worker): {received_params[0][:5].cpu().numpy()}, "
+          f"Param 1 (Worker): {received_params[1][:5].cpu().numpy()}", flush=True)
+    print(f"Rank {rank}: Param 0 (Server): {stored_params[0][:5].cpu().numpy()}, "
+          f"Param 1 (Server): {stored_params[1][:5].cpu().numpy()}", flush=True)
+
+def server_process(model, parameter_queues):
+    ps_model = ParameterServer(model)
+    ps_device = torch.device("cuda:0")  # Ensure the model is moved to cuda:0
+    ps_model.to(ps_device)
+
+    while True:
+        for q in parameter_queues:
+            rank, epoch, received_params = q.get()
+            received_params = [torch.tensor(param) for param in received_params]  # Convert back to tensors
+            averaged_params = ps_model.update_and_average_parameters(received_params, ps_device)
+            q.put((rank, epoch, averaged_params))
+
+def calculate_aupr(model, test_loader, rank, epoch, avg_epoch_loss, epoch_start_time):
+    model.eval()
+    all_labels = []
+    all_scores = []
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images = images.view(-1, 768).to(next(model.parameters()).device)  # Ensure images are on the correct device
+            outputs = model(images)
+            scores = torch.sigmoid(outputs).cpu().numpy()
+            all_scores.extend(scores)
+            all_labels.extend(labels.cpu().numpy())
+    all_labels = np.array(all_labels)
+    all_scores = np.array(all_scores).flatten()
+    precision, recall, _ = precision_recall_curve(all_labels, all_scores)
+    aupr = auc(recall, precision)
+
+    if aupr > 0.31:  # Update this value as needed
+        formatted_aupr = f"{aupr:.4f}"
+        torch.save(model.state_dict(), f'saved_models_HSA/model_aupr_{formatted_aupr}.pth')
+        print(f"Model saved with AUPR: {formatted_aupr}. Exiting script.")
+    print(f"Rank {rank}: Epoch {epoch + 1}, AUPR After Averaging: {aupr:.4f}, Avg Log Loss: {avg_epoch_loss:.4f}, Time Elapsed: {time.time() - epoch_start_time:.2f}s", flush=True)
+
+def worker_process(rank, model, train_loader, test_loader, parameter_queue, device, pos_weight):
+    model.to(device)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.8)
+
+    for epoch in range(90):
+        epoch_start_time = time.time()
+        print(f"Rank {rank}: Starting epoch {epoch + 1}", flush=True)
+
+        model.train()
+        epoch_loss = 0.0
+        num_batches = len(train_loader)
+
+        for batch_idx, (images, labels) in enumerate(train_loader):
+            images = images.view(-1, 768).to(device)
+            labels = labels.float().unsqueeze(1).to(device)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+
+        avg_epoch_loss = epoch_loss / num_batches
+
+        # Calculate AUPR before averaging in a separate process
+        aupr_process = Process(target=calculate_aupr, args=(model, test_loader, rank, epoch, avg_epoch_loss, epoch_start_time))
+        aupr_process.start()
+
+        # Send parameters to the ParameterServer
+        parameter_queue.put((rank, epoch, [param.data.clone().cpu().numpy() for param in model.parameters()]))
+
+        # Receive averaged parameters from the ParameterServer
+        new_params = parameter_queue.get()[2]
+        new_params = [torch.tensor(param).to(device) for param in new_params]
+        with torch.no_grad():
+            for param, new_param in zip(model.parameters(), new_params):
+                param.copy_(new_param)
+
+        scheduler.step()
+
+    print(f"Rank {rank}: Finished training", flush=True)
+
+def find_and_load_best_model(model, model_dir='saved_models_HSA'):
+    model_filename_pattern = re.compile(r'model_aupr_(\d+\.\d+)\.pth')
+    best_model_file = None
+
+    for filename in os.listdir(model_dir):
+        match = model_filename_pattern.match(filename)
+        if match:
+            aupr = float(match.group(1))
+            best_model_file = os.path.join(model_dir, filename)
+
+    if best_model_file:
+        try:
+            model.load_state_dict(torch.load(best_model_file))
+            print(f"Loaded model parameters from {best_model_file}")
+        except Exception as e:
+            print(f"Error loading model parameters from {best_model_file}: {e}")
+            print("Training will proceed without pre-loaded parameters.")
+    else:
+        print("No model file found. Training will proceed without pre-loaded parameters.")
+    
+    return model
+
+def main(train_loader, test_loader, pos_weight):
+    world_size = torch.cuda.device_count()  # Adjust for the server process
+    model = FastKAN([768, 64, 1])
+    model = find_and_load_best_model(model)
+
+    ctx = mp.get_context("spawn")
+    parameter_queues = [ctx.Queue() for _ in range(world_size)]
+    server = ctx.Process(target=server_process, args=(model, parameter_queues))
+    server.start()
+
+    train_size = len(train_loader.dataset)
+    indices = list(range(train_size))
+    split_size = train_size // world_size
+#    overlap_size = int(0.4 * split_size)  # 30% overlap
+#
+#    train_loaders = []
+#    for i in range(world_size):
+#        start_idx = max(0, i * split_size - overlap_size)
+#        end_idx = min(train_size, (i + 1) * split_size + overlap_size)
+#        train_indices = indices[start_idx:end_idx]
+#        train_subset = Subset(train_loader.dataset, train_indices)
+#        train_loaders.append(DataLoader(train_subset, batch_size=train_loader.batch_size, shuffle=True))
+    train_loaders = []
+    for i in range(world_size):
+        start_idx = i * split_size
+        end_idx = (i + 1) * split_size if i != world_size - 1 else train_size
+
+        train_indices = indices[start_idx:end_idx]
+        train_subset = Subset(train_loader.dataset, train_indices)
+        train_loaders.append(DataLoader(train_subset, batch_size=train_loader.batch_size, shuffle=True))
+
+    test_loaders = [
+        DataLoader(test_loader.dataset, batch_size=test_loader.batch_size, shuffle=False) for _ in range(world_size)
+    ]
+
+    workers = []
+    for rank in range(world_size):  # Include rank 0 for training
+        device = torch.device(f"cuda:{rank}")
+        worker = ctx.Process(target=worker_process, args=(rank, model, train_loaders[rank], test_loaders[rank], parameter_queues[rank], device, pos_weight))
+        worker.start()
+        workers.append(worker)
+        time.sleep(4)  # Stagger the starting of each device by 8 seconds
+
+    for worker in workers:
+        worker.join()
+
+    server.terminate()

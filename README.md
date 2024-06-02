@@ -1,11 +1,22 @@
 # DistributedKAN. Distributed training on multi-gpus using FastKAN model for large datasets
 For binary classification on large datasets, FastKAN (https://github.com/ZiyaoLi/fast-kan) produced better AUPR values than CatBoost. However, FastKAN had no options to utilize multiple GPUs. DistributedDataParallel and DataParallel were not compatible with my cluster, so I built a server capable of micromanaging multiple GPUs and handling parameter passing through a ParameterServer. I compared my server to running a single instance of FastKAN and it produced similar AUPR results, but ran 3-4 times faster (utilizing 4 GPU). I now use DistributedKAN with 10 GPUs on the same node for training of 100 million samples with 300 gb of features and the training can be completed in under and hour.
 
+If you are using a notebook load data in cell above, import and call main with your data:
 import importlib
-import distributed_training21_evaluation
-importlib.reload(distributed_training21_evaluation)
-from distributed_training21_evaluation import main
+import DistributedKAN
+importlib.reload(DistributedKAN)
+from DistributedKAN import main
 main(train_loader, test_loaders)
+
+Or to run python directly I use
+def load_data(): 
+if __name__ == '__main__':
+    import importlib
+    import DistributedKAN
+    importlib.reload(DistributedKAN)
+    from DistributedKAN import main
+    train_loader, test_loader = load_data()
+    main(train_loader, test_loaders)
 
 
 models.py - FastKAN model as presented by https://github.com/ZiyaoLi/fast-kan \

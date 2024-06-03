@@ -25,5 +25,5 @@ DistributedKAN.py - micromanage multiple GPUs and handle parameter passing throu
 
 class ParameterServer(nn.Module) Here Parameters are passed from each GPU and are stored and averaged. This allows learning to occur simultaneously between each GPU.
 def server_process(model, parameter_queues) Handles passing of parameters very effeciently
-def calculate_aupr(model, optimizer_state_dict, test_loader, rank, epoch, avg_epoch_loss, epoch_start_time) \ This function is the heart of DistributedKAN. This allows for asynchronous evaluation of the model, which increases the speed of training. Here the model is saved if criteria is met. Make sure to update this value: if aupr > 0.31
+def calculate_aupr(model, optimizer_state_dict, test_loader, rank, epoch, avg_epoch_loss, epoch_start_time) \ I preferred to do the evaluation on the  This allows for asynchronous evaluation of the model, which increases the speed of training. Here the model is saved if criteria is met. Make sure to update this value: if aupr > 0.31
 def worker_process(rank, model, train_loader, test_loader, parameter_queue, device): 

@@ -19,6 +19,7 @@ from DistributedKAN import main
 # Replace `train_loader` and `test_loader` with your data loaders
 main(train_loader, test_loader)
 
+## Implementation Details
 # DistributedKAN.py - Micromanage multiple GPUs and handle parameter passing through a ParameterServer
 
 # Import the FastKAN model

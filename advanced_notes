@@ -1,0 +1,25 @@
+If you decide to put the evaluation directly into the worker_process I still recommend starting calculate_aupr as a separate procsess because the calculation can take some time and may slow down training.
+To do so you should clone the model state dict and optimizer state dict before passing these to calculate_aupr. This is necessary for CUDA synchronization when using a single GPU.
+
+            cloned_model_state_dict = copy.deepcopy(model.state_dict())
+            cloned_optimizer_state_dict = copy.deepcopy(optimizer.state_dict())
+            aupr_process = Process(target=calculate_aupr, args=(rank, epoch, avg_epoch_loss, epoch_start_time, test_labels, test_scores, cloned_model_state_dict, cloned_optimizer_state_dict))
+            aupr_process.start()
+
+Saving and loading of the optimizer state dict can increase the initial state of your saved models. You can do this by initializing the optimizer in main, loading the state, and passing the optimizer to the worker_process:
+    optimizer = optim.AdamW(model.parameters(), lr=0.05, weight_decay=1e-4) 
+    optimizer_state_dict = torch.load('temp/opt_dict_aupr_0.3027_loss_0.0169_epoch_0.pth')
+    #optimizer_state_dict = torch.load('backup 6-3-24/opt_dict_aupr_0.2944_loss_0.0165_epoch_50.pth', map_location='cuda:0')
+    optimizer.load_state_dict(optimizer_state_dict)
+
+Notice that there is a commented version if you are using a single GPU. map_location must also be used when loading the model on a single GPU. Following the passing of the optimizer to the worker, the optimizer state values need to be passed to the current device:
+    if optimizer.state_dict():
+        print(f"Moving optimizer state values to {rank}")
+        # optimizer.load_state_dict(optimizer_state_dict)
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+        print(f"State values moved for rank {rank}")
+    else:
+        print(f"No optimizer state dict to load for rank {rank}")

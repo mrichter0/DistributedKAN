@@ -73,3 +73,8 @@ def find_and_load_best_model():
 def main():
     ...
 ```
+### Advanced Notes
+See advanced notes for additional tips and troubleshooting.
+
+### References
+FastKAN: https://github.com/ZiyaoLi/fast-kan

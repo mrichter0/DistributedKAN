@@ -1,22 +1,25 @@
 # DistributedKAN. Distributed training on multi-gpus using FastKAN model for large datasets
-For binary classification on large datasets, FastKAN (https://github.com/ZiyaoLi/fast-kan) produced better AUPR values than CatBoost. However, FastKAN had no options to utilize multiple GPUs. DistributedDataParallel and DataParallel were not compatible with my cluster, so I built a server capable of micromanaging multiple GPUs and handling parameter passing through a ParameterServer. I compared my server to running a single instance of FastKAN and it produced similar AUPR results, but ran 3-4 times faster (utilizing 4 GPU). I now use DistributedKAN with 10 GPUs on the same node for training of 100 million samples with 300 gb of features and the training can be completed in under and hour.
+For binary classification on large datasets, FastKAN (https://github.com/ZiyaoLi/fast-kan) produced better AUPR values than CatBoost. However, FastKAN had no options to utilize multiple GPUs. DistributedDataParallel and DataParallel were not compatible with my cluster, so I built a server capable of micromanaging multiple GPUs and handling parameter passing through a ParameterServer. I compared my server to running a single instance of FastKAN and it produced similar AUPR results, but ran 3-4 times faster (utilizing 4 GPU). I now use DistributedKAN with 10 GPUs on the same node for training of 100 million samples with 300 gb of features and the training can be completed in about an hour.
 
-If you are using a notebook load data in cell above, import and call main with your data:
+If you are using a notebook load your data in the cell above, import and call main with your data:
 import importlib
 import DistributedKAN
-importlib.reload(DistributedKAN)
+importlib.reload(DistributedKAN) #recommend using this to reload every time 
 from DistributedKAN import main
 main(train_loader, test_loaders)
 
-Or to run python directly I use
-def load_data(): 
+Or to run from python, I add my data loading in the same script, then run DistributedKAN
+
+def load_data():
+...
+    return train_loader, test_loader
+    
 if __name__ == '__main__':
-    import importlib
     import DistributedKAN
-    importlib.reload(DistributedKAN)
     from DistributedKAN import main
+    
     train_loader, test_loader = load_data()
-    main(train_loader, test_loaders)
+    main(train_loader, test_loader)
 
 
 models.py - FastKAN model as presented by https://github.com/ZiyaoLi/fast-kan \

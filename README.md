@@ -8,7 +8,7 @@ importlib.reload(DistributedKAN) #recommend using this to reload every time
 from DistributedKAN import main
 main(train_loader, test_loaders)
 
-Or to run from python, I add my data loading in the same script, then run DistributedKAN
+Or to run from python, I add my data loading in the same script, then run DistributedKAN (shown in load_data.py)
 
 def load_data():
 ...
@@ -22,11 +22,14 @@ if __name__ == '__main__':
     main(train_loader, test_loader)
 
 
-models.py - FastKAN model as presented by https://github.com/ZiyaoLi/fast-kan \
-load_data.py - currently setup to use TensorDataset and DataLoader \ imports main from DistributedKAN
 DistributedKAN.py - micromanage multiple GPUs and handle parameter passing through a ParameterServer \
+from models import FastKAN  # Import the FastKAN model
 
 class ParameterServer(nn.Module) Here Parameters are passed from each GPU and are stored and averaged. This allows learning to occur simultaneously between each GPU.
 def server_process(model, parameter_queues) Handles passing of parameters very effeciently
-def calculate_aupr(model, optimizer_state_dict, test_loader, rank, epoch, avg_epoch_loss, epoch_start_time) \ I preferred to do the evaluation on the  This allows for asynchronous evaluation of the model, which increases the speed of training. Here the model is saved if criteria is met. Make sure to update this value: if aupr > 0.31
-def worker_process(rank, model, train_loader, test_loader, parameter_queue, device): 
+def calculate_aupr(model, optimizer_state_dict, test_loader, rank, epoch, avg_epoch_loss, epoch_start_time) \ This allows for asynchronous evaluation of the model, which increases the speed of training. Calculates aupr, and the model is saved if criteria is met. 
+def worker_process(rank, model, train_loader, test_loader, parameter_queue, device):  The worker_process handles the training, calls calculate_aupr for evaluation, sends/receives parameters from the ParameterServer.
+def find_and_load_best_model: searches for and loads the best previously saved model in the directory.
+main: Starts all processes. Splits the training data into n groups based on the number of available GPUs. 
+
+See advanced notes for additional tips and troubleshooting!

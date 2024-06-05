@@ -11,6 +11,7 @@ import torch.multiprocessing as mp
 from models import FastKAN  # Import the FastKAN model
 import re
 import os
+from scipy.special import logit, logsumexp
 
 class ParameterServer(nn.Module):
     def __init__(self, model):
@@ -58,9 +59,15 @@ def calculate_aupr(model, test_loader, rank, epoch, avg_epoch_loss, epoch_start_
             all_labels.extend(labels.cpu().numpy())
     all_labels = np.array(all_labels)
     all_scores = np.array(all_scores).flatten()
+
+    epsilon = 1e-15
+    test_scores_clipped = np.clip(all_scores, epsilon, 1 - epsilon)
+    test_scores_logits = logit(test_scores_clipped)
+    loss = -np.mean(all_labels * test_scores_logits - logsumexp([np.zeros_like(test_scores_logits), test_scores_logits], axis=0))
+    formatted_loss = f"{loss:.4f}"
+
     precision, recall, _ = precision_recall_curve(all_labels, all_scores)
     aupr = auc(recall, precision)
-
     if aupr > 0.31:  # Update this value as needed
         formatted_aupr = f"{aupr:.4f}"
         torch.save(model.state_dict(), f'saved_models_HSA/model_aupr_{formatted_aupr}.pth')

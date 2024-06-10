@@ -25,7 +25,7 @@ main(train_loader, test_loader)
 ### DistributedKAN.py - Micromanage multiple GPUs and handle parameter passing through a ParameterServer
 
 ```python
-# Import the FastKAN model
+# Import the FastKAN model. FastKAN is placed into models.py, with no modifications
 from models import FastKAN  
 ```
 

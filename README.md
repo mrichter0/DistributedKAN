@@ -31,8 +31,9 @@ from models import FastKAN
 
 ```python
 # ParameterServer(nn.Module)
-# Here parameters are passed from each GPU and are stored and averaged. 
-# This allows learning to occur simultaneously between each GPU.
+# Here parameters are passed from each GPU and are stored and averaged. This allows learning to occur simultaneously between each GPU.
+# This is handled async so that the GPUs can keep training. I did not try any approaches involving the gradients, so this would be
+# the next area to explore.
 class ParameterServer(nn.Module):
     ...
 ```

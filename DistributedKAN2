@@ -1,0 +1,184 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.multiprocessing import Queue, Process, get_context
+import time
+import gc
+from torch.utils.data import DataLoader, Subset, TensorDataset
+from sklearn.metrics import precision_recall_curve, auc, average_precision_score
+import pandas as pd
+import torch.multiprocessing as mp
+from models import FastKAN
+import re
+import os
+import copy
+import psutil
+from scipy.special import logit, logsumexp
+from schedulefree import SGDScheduleFree
+from torch.utils.data import Subset
+os.environ['MKL_THREADING_LAYER'] = 'GNU'
+
+
+def server_process(parameter_queue, gradient_queue, worker_queues):
+    start_time = time.time()
+    num_workers = len(worker_queues)  # Determine the number of workers dynamically
+    print(f"Server process up and active. Start time {start_time}, worker count {num_workers}", flush=True)
+    while True:
+        if parameter_queue.qsize() >= num_workers and gradient_queue.qsize() >= num_workers:
+            param_entries = []
+            grad_entries = []
+            for _ in range(num_workers):
+                param_entries.append(parameter_queue.get())
+                grad_entries.append(gradient_queue.get())
+            averaged_params = []
+            for param_set in zip(*param_entries):
+                averaged_param = sum(param_set) / len(param_set)
+                averaged_params.append(averaged_param)
+            averaged_grads = []
+            for grad_set in zip(*grad_entries):
+                valid_grads = [grad for grad in grad_set if isinstance(grad, (np.ndarray, torch.Tensor))]
+                
+                if valid_grads:
+                    first_shape = valid_grads[0].shape
+                    if all(grad.shape == first_shape for grad in valid_grads):
+                        averaged_grad = sum(valid_grads) / len(valid_grads)
+                        averaged_grads.append(averaged_grad)
+                else:
+                    print("Server: No valid gradients found to average", flush=True)
+            # print(f"Server: Sending {len(averaged_params)} params and {len(averaged_grads)} grads to workers", flush=True)
+            for worker_queue in worker_queues:
+                worker_queue.put((averaged_params, averaged_grads))
+        time.sleep(10)
+
+def worker_process(rank, model, optimizer, device, train_loader, test_loader, parameter_queue, gradient_queue, worker_queue):
+# def worker_process(rank, model, optimizer, device, train_loader):
+    torch.cuda.set_device(device)
+    model.to(device)
+    criterion = nn.BCEWithLogitsLoss()
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
+    start_time = time.time()
+
+    for epoch in range(1000):
+        if rank == 0:
+            print(f"Starting epoch: {epoch}", flush=True)
+        
+        model.train()
+        epoch_loss = 0.0
+        start_time = time.time()
+
+
+        for batch_idx, (images, labels) in enumerate(train_loader):
+            images = images.view(-1, 292).to(device)
+            labels = labels.float().to(device)
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+            
+
+        # if epoch % 10 == 0 and epoch > 0:
+        if epoch % 2 == 0 and epoch > 0:
+            all_labels = []
+            all_scores = []
+            model.eval()
+            with torch.no_grad():
+                for images, labels in test_loader:
+                    images = images.view(-1, 292).to(device)
+                    outputs = model(images)
+                    scores = torch.sigmoid(outputs).cpu().numpy()
+                    all_scores.extend(scores)
+                    all_labels.extend(labels.cpu().numpy())
+            
+            all_labels = np.array(all_labels)
+            all_scores = np.array(all_scores)
+            mAP_micro = average_precision_score(all_labels, all_scores, average="micro")
+            mAP_BRD4 = average_precision_score(all_labels[:, 0], all_scores[:, 0])
+            mAP_HSA = average_precision_score(all_labels[:, 1], all_scores[:, 1])
+            mAP_sEH = average_precision_score(all_labels[:, 2], all_scores[:, 2])
+            average_time_per_epoch = (time.time() - start_time) / (epoch + 1)
+            average_map = (mAP_BRD4 + mAP_HSA + mAP_sEH) / 3
+            print(f"Rank {rank} epoch: {epoch}: BRD4 mAP: {mAP_BRD4:.4f}, HSA mAP: {mAP_HSA:.4f}, sEH mAP: {mAP_sEH:.4f}, Average mAP: {average_map:.4f}", flush=True)
+            print(f"Epoch Loss: {epoch_loss:.4f}, Time/Epoch: {average_time_per_epoch:.2f} seconds", flush=True)
+            
+            if epoch % 40 == 0:
+                opt_save_path = f'saved_models_7-6/opt_dict_total_diameter_first_third_map_{average_map:.4f}_subset{rank}_epoch_{epoch}.pth'
+                model_save_path = f'saved_models_7-6/model_dict_total_diameter_first_third_map_{average_map:.4f}_subset{rank}_epoch_{epoch}.pth'
+                torch.save(model.state_dict(), model_save_path)
+                torch.save(optimizer.state_dict(), opt_save_path)
+
+        if epoch % 4 == 0 and epoch > 0:
+            params = [param.data.clone().cpu().numpy() for param in model.parameters()]
+            parameter_queue.put(params)
+            gradients = [param.grad.clone().cpu().numpy() for param in model.parameters() if param.grad is not None]
+            gradient_queue.put(gradients)
+
+            scheduler.step()
+
+        if not worker_queue.empty():
+            new_params, new_grads = worker_queue.get_nowait()
+            new_params = [torch.tensor(param).to(device) for param in new_params]
+            new_grads = [torch.tensor(grad).to(device) for grad in new_grads]
+
+            full_new_grads = []
+            grad_index = 0
+            for i in range(18):
+                if i in [2, 8, 14]:
+                    full_new_grads.append(None)
+                else:
+                    if grad_index < len(new_grads):
+                        full_new_grads.append(new_grads[grad_index])
+                        grad_index += 1
+                    else:
+                        full_new_grads.append(None)
+        
+            with torch.no_grad():
+                for param, new_param in zip(model.parameters(), new_params):
+                    param.data.copy_((new_param + param.data) / 2)
+        
+                for param, new_grad in zip(model.parameters(), full_new_grads):
+                    if param.grad is not None and new_grad is not None and new_grad.shape == param.grad.shape:
+                        param.grad.copy_((new_grad + param.grad) / 2)
+            
+
+
+            
+
+
+def main(train_loaders, test_loaders):
+    processes_per_gpu = [1, 1, 1, 1, 1, 1, 1, 1, 1]  # Number of processes per GPU
+    num_gpus = len(processes_per_gpu)
+    world_size = sum(processes_per_gpu)
+    # num_gpus = torch.cuda.device_count()
+    # world_size = num_gpus  # One process per GPU
+    
+    model = FastKAN([292, 768, 64, 3])
+    optimizer = optim.AdamW(model.parameters(), lr=0.05, weight_decay=1e-4)
+
+    ctx = mp.get_context("spawn")
+    parameter_queue = ctx.Queue()
+    gradient_queue = ctx.Queue()
+    worker_queues = [ctx.Queue() for _ in range(world_size)]
+    server = ctx.Process(target=server_process, args=(parameter_queue, gradient_queue, worker_queues))
+    server.start()
+    
+    workers = []
+    rank = 0
+    for gpu_id, num_processes in enumerate(processes_per_gpu):
+        for _ in range(num_processes):
+            device = torch.device(f"cuda:{gpu_id}")
+            worker = ctx.Process(target=worker_process, args=(rank, model, optimizer, device, train_loaders[rank], test_loaders[rank], parameter_queue, gradient_queue, worker_queues[rank]))
+            # worker = ctx.Process(target=worker_process, args=(rank, model, optimizer, device, train_loaders[rank]))
+            worker.start()
+            workers.append(worker)
+            rank += 1
+
+    for worker in workers:
+        worker.join()
+
+
+
+

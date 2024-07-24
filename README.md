@@ -1,5 +1,7 @@
 # DistributedKAN: Distributed Training on Multi-GPUs Using FastKAN Model for Large Datasets
 
+7-24-24: Added an updated version. This includes ensemble averaging, added gradient passing as well as emsemble averaging of the gradients.
+
 ## Overview
 DistributedKAN leverages the FastKAN model for binary classification on large datasets, achieving superior AUPR values compared to CatBoost. Unlike FastKAN, which does not support multiple GPUs, DistributedKAN utilizes a custom server to manage multiple GPUs and handle parameter passing through a ParameterServer.
 
